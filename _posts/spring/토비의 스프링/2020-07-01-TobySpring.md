@@ -1,0 +1,207 @@
+---
+title: "[토비의 스프링] 5장 - 서비스 추상화"
+header:
+  overlay_color: "#333"
+categories:
+- Server
+tag: 
+- 토비의스프링
+- refactoring
+- enum
+toc: true
+toc_sticky: true
+comments: true
+---
+
+비즈니스 로직 구현 시 **엔터티 레벨과 서비스 레벨의 고려사항**에 대하여 설명한다 (사용자 레벨 관리 기능 추가)     
+
+{% capture notice-2 %}
+# 비즈니스 로직 예시
+* 사용자의 레벨은 BASIC, SILVER, GOLD 세 가지 중 하나다.  
+* 사용자가 처음 가입하면 BASIC 레벨이 되며, 이후 활동에 따라서 한 단계씩 업그레이드 된다.  
+* 가입 후 50회 이상 로그인을 하면 BASIC에서 SILVER 레벨이 된다.  
+* SILVER레벨이면서 30번 이상 추천을 받으면 GOLD레벨이 된다.  
+* 사용자 레벨의 변경 작업은 일정한 주기를 가지고 일괄적으로 진행된다. 변경 작업 전에는 조건을 충족하더라도 레벨의 변경이 일어나지 않는다.
+{% endcapture %}
+
+<div class="notice">{{ notice-2 | markdownify }}</div>
+
+# **1. Entity Level** 
+
+먼저 User클래스에 사용자의 레벨을 저장할 필드를 추가하자.  
+
+**고려사항**
+1. **데이터베이스의 User테이블**의 level 타입
+    * 데이터베이스 테이블의 컬럼값으로 일정한 종류의 정보를 문자열(BASIC, SILVER, GOLD)로 넣는 것은 별로 좋아보이지 않는다.  
+    대신 각 레벨을 코드화해서 **숫자**(0,1,2)로 넣는 것 어떨까?  
+        * 나쁘지 않다. 범위가 작은 숫자로 관리하면 가벼워서 좋다.
+2. 이에 매핑되는 **자바의 User 클래스**의 level 타입
+    * 자바의 User에 추가할 프로퍼티 타입도 **숫자**로 하면 될까?  
+        * 좋지 않다. 의미없는 숫자를 프로퍼티에 사용하면 타입이 안전하지 않아서 **_위험_**할 수 있다.  
+    
+    
+    **위험한 이유** : level의 타입이 int이기 때문에 다음처럼 다른 종류의 정보를 넣는 실수를 해도 컴파일러가 체크해주지 못한다. --> 심각한 버그 발생........  
+    {: .notice--warning}
+    
+    ```java
+    user1.setlevel(other.getSum());  // 아예 다른 값
+    user1.setlevel(1000); // 범주에 없는 값 (범주:1~3)  
+    ```
+
+
+그래서 숫자 타입을 직접 사용하는 것보다 이늄(enum)을 이용하는 게 안전하고 편리하다.  
+
+## 1.1 Level Enum 사용하기
+```java
+public enum Level {
+    BASIC(1), SILVER(2), GOLD(3);
+    
+    private final int value;
+    
+    Level(int value) {
+        this.value = value;
+    }
+        
+    public int intValue() {
+        return value;
+    }
+    public static Level valueOf(int value) {
+        switch(value) {
+            case 1: return BASIC;
+            case 2: return SILVER;
+            case 3: return GOLD;
+            default: throw new AssertionError("UnKnown value:" + value);
+        }
+    }
+}
+```
+이렇게 만들어진 Level 이늄은 내부에는 DB에 저장할 int타입의 값을 갖고 있지만, 겉으로는 Level 타입의 오브젝트이기 때문에 안전하게 사용할 수 있다.
+
+## 1.2 UserDaoJdbc 수정
+```java
+@Override
+public void add(final User user) {
+  this.jdbcTemplate.update(
+      "insert into users(id, name, password,level,login,recommend) values(?,?,?,?,?,?)",
+      user.getId(), user.getName(), user.getPassword(), 
+      user.getLevel().intValue(), user.getLogin(), user.getRecommend());
+}
+```
+
+
+SQL문장이 완성돼서 DB에 전달되기 전까지는 문법오류나 오타를 발견하기 힘들다는 게 문제다.  
+
+
+**따라서 미리미리 DB까지 연동되는 Entity Test를 잘 만들어두면 기능의 추가나 수정이 일어날 때 그 위력을 발휘한다.**
+
+# **2. Service Level**
+
+사용자 관리 로직은 어디다 두는 것이 좋을까? UserDaoJdbc는 적당하지 않다. DAO는 데이터를 어떻게 가져오고 조작할지를 다루는 곳(data access)이지
+비즈니스 로직을 두는 곳이 아니다.  
+
+**그렇다면? UserService클래스를 만들자.**  
+
+UserService는 UserDao(인터페이스 이름)인터페이스 타입으로 userDao(빈 오브젝트 이름) 빈을 DI 받아 사용하게 만든다.  
+UserService는 UserDao의 구현 클래스가 바뀌어도 영향받지 않도록 해야 한다.  
+
+
+> **데이터 액세스 로직이 바뀌었다고 비즈니스 로직 코드를 수정하는 일이 있어서는 안된다.**
+
+
+따라서 DAO의 인터페이스를 사용하고 DI를 적용해야 한다. UserService도 스프링의 빈으로 등록돼야 한다.
+
+
+## 2.1 UserService.upgradeLevels() 만들기
+```java
+public class UserService {
+  private UserDao userDao;
+
+  public void setUserDao(UserDao userDao) {
+    this.userDao = userDao;
+  }
+
+  public void upgradeLevels() {
+    List<User> users = userDao.getAll();
+
+    for (User user : users) {
+      Boolean changed = false; // 레벨 변화 체크 플래그
+
+      // BAISC 레벨 업그레이드 작업
+      if (user.getLevel() == Level.BASIC && user.getLogin() >= 50) {
+        user.setLevel(Level.SILVER);
+        changed = true;
+      }
+
+      // SILVER 레벨 업그레이드 작업
+      else if (user.getLevel() == Level.SILVER && user.getRecommend() >= 30) {
+        user.setLevel(Level.GOLD);
+        changed = true;
+      }
+
+      else if (user.getLevel() == Level.GOLD)
+        changed = false;
+      else
+        changed = false;
+
+      if (changed)
+        userDao.update(user);
+    }
+  }
+}
+```
+
+
+## 2.2 테스트 클래스 추가
+```java
+@Before
+public void setUp() {
+  users = Arrays.asList(new User("gyumee", "박성철", "springno1", Level.BASIC, 49, 0),
+      new User("gyumee2", "박성4철", "springno61", Level.BASIC, 50, 0),
+      new User("gyumee3", "박성5철", "springno71", Level.SILVER, 60, 29),
+      new User("leegw700", "이길원", "springno2", Level.SILVER, 60, 30),
+      new User("bumjin", "박범진", "springno3", Level.GOLD, 100, 40));
+}
+@Test
+public void upgradeLevels() {
+  userDao.deleteAll();
+
+  for (User user : users)
+    userDao.add(user);
+
+  userService.upgradeLevels();
+
+  checkLevel(users.get(0), Level.BASIC);
+  checkLevel(users.get(1), Level.SILVER);
+  checkLevel(users.get(2), Level.SILVER);
+  checkLevel(users.get(3), Level.GOLD);
+  checkLevel(users.get(4), Level.GOLD);
+}
+
+private void checkLevel(User user, Level expectedLevel) {
+  User userUpdate = userDao.get(user.getId());
+  assertThat(userUpdate.getLevel(), is(expectedLevel));
+}
+```
+
+
+## 2.3 level 필드는 어디에서 초기화를 해야할까?
+처음 가입하는 사용자는 기본적으로 BASIC 레벨을 가져야 한다. 이 로직을 어디에 담는게 좋을까?
+
+1. **UserDaoJdbc.add()**는 적합하지 않아 보인다.
+    - UserDaoJdbc는 data access만 담당해야지 비즈니스 로직은 바람직하지 않다.
+2. **User** 엔티티 클래스에서 아예 초기화하는 것은 어떨까? (@Builder.Default)
+    - 처음 가입할 때를 제외하면 무의미한 정보인데 단지 이 로직을 담기 위해 클래스에서 직접 초기화하는 것은 좀 그렇다..
+3. **_그렇다면 UserService는 어떨까?_**
+    - UserService에도 add()를 만들어두고 사용자가 등록될 때 적용할 만한 비즈니스 로직을 담당하게 해보자.
+
+## 2.4 리팩토링
+작성된 코드를 살펴볼 때는 다음과 같은 질문을 해볼 필요가 있다.
+1. 코드에 중복은 없는가?
+2. 코드를 이해하는데 불편하지 않은가?
+3. 코드가 자신이 있어야 할 자리에 있는가?
+4. 앞으로 변경이 일어나면 어떤 것이 있을 수 있고, 변경에 유연하게 대응할 수 있느냐?
+{: .notice--info}
+
+
+**객체지향적인 코드는 다른 오브젝트의 데이터를 가져와서 작업하는 대신 데이터를 갖고 있는 다른 오브젝트에게 작업을 해달라고 요청을 해야한다. 오브젝트에게 데이터를 요구하지 말고 작업을 요청하라는 것이 객체지향 프로그래밍의 가장 기본이 되는 원리이다.**
+{: .notice--success}
