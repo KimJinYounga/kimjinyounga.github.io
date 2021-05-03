@@ -1,14 +1,14 @@
 ---
 title: "[Kotlin] Kotlin 문법 정리"
 header:
-overlay_color: "#333"
+    overlay_color: "#333"
 categories:
-- Kotlin
-  tag:
+- Kotlin 
+tag:
 - kotlin
-  toc: true
-  toc_sticky: true
-  comments: true
+toc: true
+toc_sticky: true
+comments: true
 ---
 
 
